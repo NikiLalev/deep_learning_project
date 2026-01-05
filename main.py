@@ -1,4 +1,4 @@
-
+from src.preprocessing.data_importer import preprocess_data
 
 if __name__ == "__main__":
-    pass
+    preprocess_data()
