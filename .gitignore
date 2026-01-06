@@ -42,4 +42,4 @@ pythonenv*/
 .coverage
 htmlcov/
 
-data/images/
+data/**
