@@ -43,3 +43,5 @@ pythonenv*/
 htmlcov/
 
 data/**
+
+.env
