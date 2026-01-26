@@ -57,12 +57,12 @@ class YOLOPretrain(nn.Module):
 
         # Final Classifier Layer
         self.classifier = nn.Sequential(
-            # Map the 1024 feature channels to the 1000 class scores
-            nn.Conv2d(1024, num_classes, kernel_size=1, padding=0, bias=True),
-            nn.LeakyReLU(0.1, inplace=True),
-            # Average pool layer to get 1x1x1000 output
+            # Average pool layer (from 1024x7x7 to 1024x1x1)
             nn.AdaptiveAvgPool2d((1, 1)),
-            nn.Flatten()
+            nn.Flatten(),
+            # Fully connected layer
+            nn.Linear(1024, num_classes),
+            nn.LeakyReLU(0.1, inplace=True)            
         )
 
     def forward(self, x):
