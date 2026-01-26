@@ -62,7 +62,6 @@ class YOLOPretrain(nn.Module):
             nn.Flatten(),
             # Fully connected layer
             nn.Linear(1024, num_classes),
-            nn.LeakyReLU(0.1, inplace=True)            
         )
 
     def forward(self, x):
