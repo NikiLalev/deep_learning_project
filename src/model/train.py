@@ -6,9 +6,7 @@ import optuna
 from optuna.trial import TrialState
 from tqdm import tqdm
 
-# --- IMPORT YOUR MODEL ---
-# Assuming the file is at src/model/classification_imagenet.py
-# Adjust the import path if your folder structure differs slightly
+
 from src.model.classification_imagenet import YOLOPretrain
 
 # --- MOCK IMPORTS FOR DATA LOADERS ---

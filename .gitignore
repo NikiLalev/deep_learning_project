@@ -45,3 +45,25 @@ htmlcov/
 data/**
 
 .env
+
+# Ignore Model Weights (Too big for GitHub)
+*.pth
+checkpoints/
+models/
+
+# Ignore Logs (Optional, keep if you want history, ignore if messy)
+logs/
+*.out
+*.err
+
+# System & Cache
+__pycache__/
+*.pyc
+.DS_Store
+.vscode/
+venv/
+.env
+
+# Data
+data/
+huggingface_cache/

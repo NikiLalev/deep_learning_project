@@ -59,12 +59,10 @@ def get_data_loaders(batch_size, train_n, val_n):
     print("Loading ImageNet Stream...")
     
     # We override the N parameters to control dataset size from here
-    # Your loaders.py needs to be able to accept these args or you edit loaders.py
-    # Based on your code, load_imagenet takes these args.
     from src.preprocessing.loaders import load_imagenet
     
     # We use load_imagenet directly so we can pass n arguments
-    # Note: We need the transforms. Your load_imagenet calls preprocess_imagenet inside map.
+    # load_imagenet calls preprocess_imagenet inside map.
     # But we need 'to_torch' eventually. 
     # Let's use load_imagenet_iterable but we might need to patch the counts if hardcoded.
     
