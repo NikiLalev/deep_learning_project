@@ -7,9 +7,18 @@
 #SBATCH --mem=16G
 #SBATCH --cpus-per-task=4
 
+
+rm -rf /scratch/s4015843/envs/yolo_env
+
 # Load modules
 module purge
-module load Python/3.9.6-GCCcore-11.2.0
+module load Python/3.11.5-GCCcore-13.2.0
+
+# 2. Create the directory in scratch
+mkdir -p /scratch/$USER/envs
+
+# 3. Create the virtual environment
+python3 -m venv /scratch/$USER/envs/yolo_env
 
 # PATHS
 export HF_HOME=/scratch/$USER/huggingface_cache
@@ -19,27 +28,14 @@ mkdir -p $HF_HOME $HF_DATASETS_CACHE
 # Activate Environment
 source /scratch/$USER/envs/yolo_env/bin/activate
 
+# 5. Install your requirements (ensure requirements.txt is in your current folder)
+pip install --upgrade pip
+pip install -r requirements.txt
+
 echo "Job started on $(date)"
 echo "Downloading to: $HF_HOME"
 
 
-python -c "
-from huggingface_hub import snapshot_download
-import os
+python download_data.py --output_dir /scratch/$USER/voc_data
 
-print('Starting Download via snapshot_download...')
-
-# Download the dataset files directly to the cache
-# This uses low RAM because it streams files to disk
-snapshot_download(
-    repo_id='ILSVRC/imagenet-1k',
-    repo_type='dataset',
-    token=os.environ.get('HF_TOKEN'),
-    cache_dir=os.environ['HF_HOME'],
-    resume_download=True
-)
-
-print('Success! Files downloaded to cache.')
-"
-
-echo "Job finished on $(date)"
+echo \"Job finished on \$(date)\"

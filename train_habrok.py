@@ -1,409 +1,528 @@
 #!/usr/bin/env python
+from __future__ import annotations
 # -*- coding: utf-8 -*-
 """
-YOLO ImageNet Pretraining on Habrok HPC
+YOLO posttraining on Habrok HPC
 Replicates the original YOLO (2016) paper training procedure
 """
 
+import json
 import sys
-import os
+from dataclasses import dataclass
+from datetime import datetime
+from io import BytesIO
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
 import torch
-import torch.nn as nn
 import torch.optim as optim
+import torchvision.transforms.functional as F
+from datasets import load_from_disk
+from PIL import Image
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-import json
-from datetime import datetime
 
-# Setup paths
-current_dir = Path(__file__).parent
-sys.path.insert(0, str(current_dir))
-
-print(f"Project Root: {current_dir}")
-print(f"Python version: {sys.version}")
-print(f"PyTorch version: {torch.__version__}")
+# Project root
+CURRENT_DIR = Path(__file__).parent
+sys.path.insert(0, str(CURRENT_DIR))
 
 # Import project modules
 from src.model.classification_imagenet import YOLOPretrain
-from src.preprocessing.data_loader import load_imagenet_iterable
+from src.model.detector import YOLOv1
+from yolo_loss import YOLOv1Loss  # (kept import minimal; iou helpers not used here)
 
-# Check CUDA
-print(f"\nCUDA Available: {torch.cuda.is_available()}")
-if torch.cuda.is_available():
-    print(f"CUDA Version: {torch.version.cuda}")
-    print(f"GPU Device: {torch.cuda.get_device_name(0)}")
-    print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+
+def print_env() -> None:
+    print(f"Project Root: {CURRENT_DIR}")
+    print(f"Python version: {sys.version}")
+    print(f"PyTorch version: {torch.__version__}")
+    print(f"\nCUDA Available: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        print(f"CUDA Version: {torch.version.cuda}")
+        print(f"GPU Device: {torch.cuda.get_device_name(0)}")
+        props = torch.cuda.get_device_properties(0)
+        print(f"GPU Memory: {props.total_memory / 1e9:.2f} GB")
+
 
 # ============================================================================
-# Configuration - Exact YOLO Paper Settings
+# Configuration
 # ============================================================================
 
+@dataclass
 class Config:
-    """Training configuration matching YOLO 2016 paper"""
-    
-    # Model parameters
-    NUM_CLASSES = 1000  # ImageNet-1k
-    
-    # HuggingFace token for streaming ImageNet
-    HF_TOKEN = os.environ.get("HF_TOKEN")
-    
-    # Training parameters (FROM YOLO PAPER)
-    BATCH_SIZE = 128  # Standard for ImageNet (reduce to 64 if OOM)
-    LEARNING_RATE = 0.1  # Paper uses 0.1 for SGD
-    EPOCHS = 160  # Paper: 160 epochs for pretraining
-    OPTIMIZER = "SGD"
-    
-    # SGD settings (FROM YOLO PAPER)
-    MOMENTUM = 0.9
-    WEIGHT_DECAY = 0.0005
-    
+    """Training configuration."""
+    NUM_CLASSES: int = 20
+
+    # Training parameters
+    BATCH_SIZE: int = 64
+    LEARNING_RATE: float = 1e-4
+    EPOCHS: int = 90
+    OPTIMIZER: str = "ADAM"
+
     # Data parameters
-    TRAIN_N = None  # None = full ImageNet (1.28M images)
-    VAL_N = None    # None = full validation (50K images)
-    NUM_WORKERS = 4
-    
-    # Learning rate schedule
-    # Paper doesn't specify exact schedule for pretraining
-    # Standard ImageNet: decay at epochs 30, 60, 90, 120
-    USE_LR_SCHEDULER = True
-    LR_MILESTONES = [30, 60, 90, 120]  # Decay at these epochs
-    LR_GAMMA = 0.1  # Multiply LR by 0.1 at each milestone
-    
-    # Checkpointing
-    CHECKPOINT_DIR = current_dir / "checkpoints"
-    SAVE_FREQUENCY = 5  # Save every 5 epochs
-    
-    # Device
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # Mixed precision (optional, not in original paper but speeds up training)
-    USE_AMP = True
-    
-    # Logging
-    LOG_DIR = current_dir / "logs"
-    
-    def __init__(self):
+    TRAIN_N: Optional[int] = None
+    VAL_N: Optional[int] = None
+    NUM_WORKERS: int = 0
+
+    # LR schedule
+    USE_LR_SCHEDULER: bool = True
+    LR_MILESTONES: Tuple[int, ...] = (30, 60)
+    LR_GAMMA: float = 0.1
+
+    # Checkpointing / logging
+    SAVE_FREQUENCY: int = 5
+    WEIGHT_DECAY: float = 1e-5
+    USE_AMP: bool = True
+
+    # Paths
+    CHECKPOINT_DIR: Path = CURRENT_DIR / "checkpoints"
+    LOG_DIR: Path = CURRENT_DIR / "logs"
+
+    # Runtime
+    # DEVICE: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    timestamp: str = ""
+
+    def __post_init__(self) -> None:
         self.CHECKPOINT_DIR.mkdir(exist_ok=True)
         self.LOG_DIR.mkdir(exist_ok=True)
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-    def save_config(self):
-        """Save configuration to JSON"""
-        config_dict = {k: str(v) if isinstance(v, Path) else v 
-                      for k, v in self.__dict__.items() 
-                      if not k.startswith('_') and k != 'HF_TOKEN'}
-        config_file = self.LOG_DIR / f"config_{self.timestamp}.json"
-        with open(config_file, 'w') as f:
-            json.dump(config_dict, f, indent=2)
-        print(f"✓ Config saved to {config_file}")
+
+    def save_config(self) -> Path:
+        d = {
+            k: (str(v) if isinstance(v, Path) else v)
+            for k, v in self.__dict__.items()
+        }
+        out = self.LOG_DIR / f"config_{self.timestamp}.json"
+        with open(out, "w") as f:
+            # json.dump(d, f, indent=2)
+            json.dump(d, f, indent=2, default=str)
+        return out
+
 
 # ============================================================================
-# Data Loading
+# Data loading
 # ============================================================================
 
-def get_data_loaders(config):
-    """Load ImageNet"""
-    print("\n" + "="*60)
-    print("LOADING IMAGENET DATASET")
-    print("="*60)
-    
-    # Enable streaming!
-    ds_dict = load_imagenet_iterable(
-        streaming=True,   # <--- SET TO TRUE
-        train_n=config.TRAIN_N,
-        val_n=config.VAL_N,
-        hf_token=config.HF_TOKEN
-    )
-    
-    # For streaming, we cannot use shuffle=True in DataLoader
-    # (The dataset is already shuffled via buffer)
+def _collate_yolo(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+    images = torch.stack([b["image"] for b in batch])
+    boxes = [b["boxes"] for b in batch]
+    labels = [b["labels"] for b in batch]
+    return {"images": images, "boxes": boxes, "labels": labels}
+
+
+def _ensure_pil(img: Any) -> Image.Image:
+    if isinstance(img, dict):
+        b = img.get("bytes", None)
+        if b is None:
+            raise ValueError(f"Image dict has no bytes. keys={list(img.keys())}")
+        img = Image.open(BytesIO(b))
+    return img
+
+
+def _to_torch(example: Dict[str, Any]) -> Dict[str, Any]:
+    img = example["image"]
+
+    # Batched case
+    if isinstance(img, list):
+        imgs = [_ensure_pil(im) for im in img]
+        return {
+            "image": torch.stack([F.to_tensor(im) for im in imgs]),
+            "boxes": [torch.tensor(b, dtype=torch.float32) for b in example["boxes"]],
+            "labels": [torch.tensor(l, dtype=torch.long) for l in example["labels"]],
+        }
+
+    # Single example
+    img = _ensure_pil(img)
+    return {
+        "image": F.to_tensor(img),
+        "boxes": torch.tensor(example["boxes"], dtype=torch.float32),
+        "labels": torch.tensor(example["labels"], dtype=torch.long),
+    }
+
+
+def get_data_loaders(config: Config) -> Tuple[DataLoader, DataLoader]:
+    print("\n" + "=" * 60)
+    print("LOADING PASCAL VOC DATASET")
+    print("=" * 60)
+
+    # ds = load_from_disk("data/pascal_voc_yolo_448")
+    ds = load_from_disk("/scratch/s4015843/data/pascal_voc_yolo_448")
+    train_ds = ds["train"]
+    val_ds = ds["test"]  # original code uses test as val
+
+    if getattr(config, "STREAMING", False):
+        train_ds = train_ds.to_iterable_dataset()
+        val_ds = val_ds.to_iterable_dataset()
+
+    train_ds = train_ds.with_transform(_to_torch)
+    val_ds = val_ds.with_transform(_to_torch)
+
+    pin = torch.cuda.is_available()
+    is_streaming = getattr(config, "STREAMING", False)
+
     train_loader = DataLoader(
-        ds_dict["train"],
+        train_ds,
         batch_size=config.BATCH_SIZE,
         num_workers=config.NUM_WORKERS,
-        pin_memory=True if torch.cuda.is_available() else False
+        pin_memory=pin,
+        shuffle=not is_streaming,
+        collate_fn=_collate_yolo,
     )
-    
+
     val_loader = DataLoader(
-        ds_dict["validation"],
+        val_ds,
         batch_size=config.BATCH_SIZE,
         num_workers=config.NUM_WORKERS,
-        pin_memory=True if torch.cuda.is_available() else False
+        pin_memory=pin,
+        shuffle=False,
+        collate_fn=_collate_yolo,
     )
-    
+
     return train_loader, val_loader
+
+
 # ============================================================================
-# Training Functions
+# Targets
 # ============================================================================
 
-def train_one_epoch(model, loader, criterion, optimizer, scaler, config, epoch):
-    """Train for one epoch"""
+def build_targets_yolov1(
+    boxes_list: List[torch.Tensor],
+    labels_list: List[torch.Tensor],
+    S: int = 7,
+    B: int = 2,
+    C: int = 20,
+    device: str | torch.device = "cpu",
+) -> torch.Tensor:
+    """
+    boxes_list: list length batch, each is Tensor [Ni,4] in normalized xywh (0..1)
+    labels_list: list length batch, each is Tensor [Ni]
+    Returns: targets Tensor [B,S,S, C + B*5]
+    Layout per cell:
+      [class_onehot(C), conf1, x1, y1, w1, h1, conf2, x2, y2, w2, h2]
+    """
+    bs = len(boxes_list)
+    targets = torch.zeros((bs, S, S, C + B * 5), device=device)
+
+    for b in range(bs):
+        boxes = boxes_list[b]
+        labels = labels_list[b]
+        if boxes.numel() == 0:
+            continue
+
+        for (xc, yc, w, h), cls in zip(boxes, labels):
+            i = int(yc * S)
+            j = int(xc * S)
+            i = max(0, min(S - 1, i))
+            j = max(0, min(S - 1, j))
+
+            # One object per cell (paper limitation)
+            if targets[b, i, j, C] == 1:
+                continue
+
+            targets[b, i, j, int(cls)] = 1.0
+
+            x_cell = xc * S - j
+            y_cell = yc * S - i
+
+            # box1
+            targets[b, i, j, C + 0] = 1.0
+            targets[b, i, j, C + 1 : C + 5] = torch.tensor([x_cell, y_cell, w, h], device=device)
+
+            # box2
+            targets[b, i, j, C + 5] = 1.0
+            targets[b, i, j, C + 6 : C + 10] = torch.tensor([x_cell, y_cell, w, h], device=device)
+
+    return targets
+
+
+# ============================================================================
+# Training / validation
+# ============================================================================
+
+def train_one_epoch(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    criterion: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scaler: Optional[torch.cuda.amp.GradScaler],
+    config: Config,
+    epoch: int,
+) -> float:
     model.train()
     running_loss = 0.0
-    correct = 0
-    total = 0
-    
+    total_images = 0
+
     pbar = tqdm(loader, desc=f"Epoch {epoch}/{config.EPOCHS} [Train]")
-    
-    for batch_idx, batch in enumerate(pbar):
-        inputs = batch['image'].to(config.DEVICE)
-        targets = batch['label'].to(config.DEVICE)
-        
-        optimizer.zero_grad()
-        
-        # Mixed precision training
-        if config.USE_AMP and torch.cuda.is_available():
+    for batch in pbar:
+        images = batch["images"].to(config.DEVICE)
+        boxes = [b.to(config.DEVICE) for b in batch["boxes"]]
+        labels = [l.to(config.DEVICE) for l in batch["labels"]]
+
+        targets = build_targets_yolov1(boxes, labels, S=7, B=2, C=20, device=config.DEVICE)
+
+        optimizer.zero_grad(set_to_none=True)
+
+        if scaler is not None:
             with torch.cuda.amp.autocast():
-                outputs = model(inputs)
-                loss = criterion(outputs, targets)
+                preds = model(images)  # [B,7,7,30]
+                loss = criterion(preds, targets)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
         else:
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
+            preds = model(images)
+            loss = criterion(preds, targets)
             loss.backward()
             optimizer.step()
-        
-        # Statistics
-        running_loss += loss.item() * inputs.size(0)
-        _, predicted = outputs.max(1)
-        total += targets.size(0)
-        correct += predicted.eq(targets).sum().item()
-        
-        if batch_idx % 10 == 0:
-            pbar.set_postfix({
-                'loss': f'{running_loss/total:.4f}',
-                'acc': f'{100.*correct/total:.2f}%'
-            })
-    
-    epoch_loss = running_loss / total
-    epoch_acc = 100. * correct / total
-    
-    return epoch_loss, epoch_acc
+
+        bs = images.size(0)
+        running_loss += loss.item() * bs
+        total_images += bs
+        pbar.set_postfix(loss=f"{running_loss / total_images:.4f}")
+
+    return running_loss / total_images
 
 
-def validate(model, loader, criterion, config, epoch):
-    """Validate the model"""
+@torch.no_grad()
+def validate(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    criterion: torch.nn.Module,
+    config: Config,
+    epoch: int,
+) -> float:
     model.eval()
     running_loss = 0.0
-    correct = 0
-    total = 0
-    
+    total_images = 0
+
     pbar = tqdm(loader, desc=f"Epoch {epoch}/{config.EPOCHS} [Val]")
-    
-    with torch.no_grad():
-        for batch in pbar:
-            inputs = batch['image'].to(config.DEVICE)
-            targets = batch['label'].to(config.DEVICE)
-            
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
-            
-            running_loss += loss.item() * inputs.size(0)
-            _, predicted = outputs.max(1)
-            total += targets.size(0)
-            correct += predicted.eq(targets).sum().item()
-            
-            pbar.set_postfix({
-                'loss': f'{running_loss/total:.4f}',
-                'acc': f'{100.*correct/total:.2f}%'
-            })
-    
-    epoch_loss = running_loss / total
-    epoch_acc = 100. * correct / total
-    
-    return epoch_loss, epoch_acc
+    for batch in pbar:
+        images = batch["images"].to(config.DEVICE)
+        boxes = [b.to(config.DEVICE) for b in batch["boxes"]]
+        labels = [l.to(config.DEVICE) for l in batch["labels"]]
+
+        targets = build_targets_yolov1(boxes, labels, S=7, B=2, C=20, device=config.DEVICE)
+        preds = model(images)
+        loss = criterion(preds, targets)
+
+        bs = images.size(0)
+        running_loss += loss.item() * bs
+        total_images += bs
+        pbar.set_postfix(loss=f"{running_loss / total_images:.4f}")
+
+    return running_loss / total_images
 
 
-def save_checkpoint(model, optimizer, scheduler, epoch, train_loss, val_loss, val_acc, config):
-    """Save model checkpoint"""
+def save_checkpoint(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
+    epoch: int,
+    train_loss: float,
+    val_loss: float,
+    config: Config,
+) -> Path:
     checkpoint = {
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
-        'train_loss': train_loss,
-        'val_loss': val_loss,
-        'val_acc': val_acc,
+        "epoch": int(epoch),
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
+        "train_loss": float(train_loss),
+        "val_loss": float(val_loss),
+        "lr": float(optimizer.param_groups[0]["lr"]),
     }
-    
-    # Save latest
+
     latest_path = config.CHECKPOINT_DIR / "checkpoint_latest.pth"
     torch.save(checkpoint, latest_path)
-    
-    # Save periodic checkpoint
+
     if epoch % config.SAVE_FREQUENCY == 0:
         epoch_path = config.CHECKPOINT_DIR / f"checkpoint_epoch_{epoch:03d}.pth"
         torch.save(checkpoint, epoch_path)
         print(f"✓ Checkpoint saved: {epoch_path}")
-    
+
     return latest_path
 
-# ============================================================================
-# Main Training Loop
-# ============================================================================
 
-def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, scaler, config):
-    """Main training loop"""
-    
-    history = {
-        'train_loss': [],
-        'train_acc': [],
-        'val_loss': [],
-        'val_acc': [],
-        'lr': []
-    }
-    
-    best_val_acc = 0.0
-    
-    print("\n" + "="*60)
-    print("STARTING TRAINING - YOLO IMAGENET PRETRAINING")
-    print("="*60)
+def train_model(
+    model: torch.nn.Module,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    criterion: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
+    scaler: Optional[torch.cuda.amp.GradScaler],
+    config: Config,
+) -> Dict[str, List[float]]:
+    history: Dict[str, List[float]] = {"train_loss": [], "val_loss": [], "lr": []}
+    best_val_loss = float("inf")
+
+    print("\n" + "=" * 60)
+    print("STARTING TRAINING - YOLOv1 PASCAL VOC (DETECTION)")
+    print("=" * 60)
     print(f"Total epochs: {config.EPOCHS}")
     print(f"Batch size: {config.BATCH_SIZE}")
     print(f"Learning rate: {config.LEARNING_RATE}")
     print(f"Optimizer: {config.OPTIMIZER}")
-    print("="*60 + "\n")
-    
+    print("=" * 60 + "\n")
+
     for epoch in range(1, config.EPOCHS + 1):
-        # Training
-        train_loss, train_acc = train_one_epoch(
-            model, train_loader, criterion, optimizer, scaler, config, epoch
-        )
-        
-        # Validation
-        val_loss, val_acc = validate(
-            model, val_loader, criterion, config, epoch
-        )
-        
-        # Update learning rate
-        current_lr = optimizer.param_groups[0]['lr']
-        if scheduler:
+        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, scaler, config, epoch)
+        val_loss = validate(model, val_loader, criterion, config, epoch)
+
+        current_lr = optimizer.param_groups[0]["lr"]
+        if scheduler is not None:
             scheduler.step()
-        
-        # Record history
-        history['train_loss'].append(train_loss)
-        history['train_acc'].append(train_acc)
-        history['val_loss'].append(val_loss)
-        history['val_acc'].append(val_acc)
-        history['lr'].append(current_lr)
-        
-        # Print epoch summary
+
+        history["train_loss"].append(float(train_loss))
+        history["val_loss"].append(float(val_loss))
+        history["lr"].append(float(current_lr))
+
         print(f"\nEpoch {epoch}/{config.EPOCHS} Summary:")
-        print(f"  Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
-        print(f"  Val Loss:   {val_loss:.4f} | Val Acc:   {val_acc:.2f}%")
+        print(f"  Train Loss: {train_loss:.4f}")
+        print(f"  Val Loss:   {val_loss:.4f}")
         print(f"  Learning Rate: {current_lr:.6f}")
-        
-        # Save checkpoint
-        save_checkpoint(model, optimizer, scheduler, epoch, train_loss, val_loss, val_acc, config)
-        
-        # Save best model
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
+
+        save_checkpoint(model, optimizer, scheduler, epoch, train_loss, val_loss, config)
+
+        if val_loss < best_val_loss:
+            best_val_loss = float(val_loss)
             best_path = config.CHECKPOINT_DIR / "checkpoint_best.pth"
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'val_acc': val_acc,
-            }, best_path)
-            print(f"  ★ New best model! Val Acc: {val_acc:.2f}% (saved to {best_path})")
-        
-        print("="*60 + "\n")
-    
-    # Save training history
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "val_loss": float(val_loss),
+                },
+                best_path,
+            )
+            print(f"  ★ New best model! Val Loss: {val_loss:.4f} (saved to {best_path})")
+
+        print("=" * 60 + "\n")
+
     history_path = config.LOG_DIR / f"training_history_{config.timestamp}.json"
-    with open(history_path, 'w') as f:
-        json.dump(history, f, indent=2)
-    
-    print(f"\n✓ Training completed!")
-    print(f"✓ Best validation accuracy: {best_val_acc:.2f}%")
+    with open(history_path, "w") as f:
+        # json.dump(history, f, indent=2)
+        json.dump(history, f, indent=2, default=str)
+
+    print("\n✓ Training completed!")
+    print(f"✓ Best validation loss: {best_val_loss:.4f}")
     print(f"✓ Training history saved to {history_path}")
-    
+
     return history
 
+
 # ============================================================================
-# Main Entry Point
+# Main
 # ============================================================================
 
-def main():
-    """Main function"""
-    
-    # Initialize config
+def main() -> None:
+    print_env()
+
     config = Config()
-    config.save_config()
-    
-    print("\n" + "="*60)
-    print("YOLO IMAGENET PRETRAINING - HABROK HPC")
+    config_path = config.save_config()
+
+    print("\n" + "=" * 60)
+    print("YOLO POSTTRAINING DETECTION - HABROK HPC")
     print("Replicating YOLO (2016) Paper Settings")
-    print("="*60)
+    print("=" * 60)
+    print(f"Config saved: {config_path}")
     print(f"Device: {config.DEVICE}")
     print(f"Batch Size: {config.BATCH_SIZE}")
     print(f"Learning Rate: {config.LEARNING_RATE}")
     print(f"Epochs: {config.EPOCHS}")
-    print(f"Optimizer: {config.OPTIMIZER} (momentum={config.MOMENTUM}, weight_decay={config.WEIGHT_DECAY})")
-    print(f"LR Schedule: MultiStepLR (milestones={config.LR_MILESTONES}, gamma={config.LR_GAMMA})")
-    print("="*60)
-    
-    # Load data
+    print(f"Optimizer: {config.OPTIMIZER}, weight_decay={config.WEIGHT_DECAY})")
+    print(f"LR Schedule: MultiStepLR (milestones={list(config.LR_MILESTONES)}, gamma={config.LR_GAMMA})")
+    print("=" * 60)
+
     train_loader, val_loader = get_data_loaders(config)
-    
-    # Initialize model
-    print("\n" + "="*60)
+    train_loader, val_loader = get_data_loaders(config)
+
+    print("DEBUG: Testing data loader...")
+    try:
+        batch = next(iter(train_loader))
+        print(f"DEBUG: Batch loaded successfully! Keys: {batch.keys()}")
+    except Exception as e:
+        print(f"DEBUG: Failed to load batch! Error: {e}")
+        raise e
+
+    print("\n" + "=" * 60)
     print("INITIALIZING MODEL")
-    print("="*60)
-    model = YOLOPretrain(num_classes=config.NUM_CLASSES).to(config.DEVICE)
+    print("=" * 60)
+
+    print("\nLoading pretrained ImageNet model...")
+    pretrain = YOLOPretrain(num_classes=20)
+    ckpt = torch.load("yolo_pretrain_manual.pth", map_location="cpu")
+    pretrain_state = pretrain.state_dict()
+    print([(k, v.shape) for k, v in ckpt.items()])
+
+    print(f"{'LAYER NAME':<40} | {'CHECKPOINT SHAPE':<20} | {'MODEL SHAPE':<20}")
+    print("-" * 85)
+
+    for name, param in ckpt.items():
+        if name in pretrain_state:
+            ckpt_shape = str(list(param.shape))
+            model_shape = str(list(pretrain_state[name].shape))
+            match = "✅" if ckpt_shape == model_shape else "❌ MISMATCH"
+            print(f"{name:<40} | {ckpt_shape:<20} | {model_shape:<20} {match}")
+        else:
+            print(f"{name:<40} | {str(list(param.shape)):<20} | {'MISSING IN MODEL':<20}")
+    pretrain.load_state_dict(ckpt)
+    pretrain.eval()
     
+    print("Initializing YOLOv1 detector...")
+    model = YOLOv1(split_size=7, num_boxes=2, num_classes=20)
+    model.load_pretrain_weights(pretrain)
+    model = model.to(config.DEVICE)
+
+    print(model) # Print model architecture
+
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    
     print(f"Model: YOLOPretrain (First 20 conv layers from YOLO)")
     print(f"Total Parameters: {total_params:,}")
     print(f"Trainable Parameters: {trainable_params:,}")
-    print("="*60)
-    
-    # Loss function
-    criterion = nn.CrossEntropyLoss()
-    
-    # Optimizer (YOLO paper settings)
-    optimizer = optim.SGD(
+    print("=" * 60)
+
+    criterion = YOLOv1Loss(S=7, B=2, C=20).to(config.DEVICE)
+
+    optimizer = torch.optim.Adam(
         model.parameters(),
         lr=config.LEARNING_RATE,
-        momentum=config.MOMENTUM,
-        weight_decay=config.WEIGHT_DECAY
+        weight_decay=config.WEIGHT_DECAY,
     )
-    
-    # Learning rate scheduler
+
     scheduler = optim.lr_scheduler.MultiStepLR(
         optimizer,
-        milestones=config.LR_MILESTONES,
-        gamma=config.LR_GAMMA
+        milestones=list(config.LR_MILESTONES),
+        gamma=config.LR_GAMMA,
     )
-    
-    # Gradient scaler for mixed precision
+
     scaler = torch.cuda.amp.GradScaler() if config.USE_AMP and torch.cuda.is_available() else None
-    
-    # Train
+
     history = train_model(
-        model, train_loader, val_loader,
-        criterion, optimizer, scheduler, scaler,
-        config
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        criterion=criterion,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        scaler=scaler,
+        config=config,
     )
-    
-    # Save final model
-    final_model_path = current_dir / "yolo_pretrain_imagenet.pth"
+
+    final_model_path = CURRENT_DIR / "yolov1_voc.pth"
     torch.save(model.state_dict(), final_model_path)
-    
-    print("\n" + "="*60)
+
+    print("\n" + "=" * 60)
     print("TRAINING COMPLETE")
-    print("="*60)
-    print(f"Best Validation Accuracy: {max(history['val_acc']):.2f}%")
-    print(f"Final Training Accuracy: {history['train_acc'][-1]:.2f}%")
-    print(f"Final Validation Accuracy: {history['val_acc'][-1]:.2f}%")
+    print("=" * 60)
+    print(f"Best Validation Loss: {min(history['val_loss']):.4f}")
+    print(f"Final Training Loss: {history['train_loss'][-1]:.4f}")
+    print(f"Final Validation Loss: {history['val_loss'][-1]:.4f}")
     print(f"Model saved to: {final_model_path}")
-    print("="*60)
+    print("=" * 60)
 
 
 if __name__ == "__main__":
