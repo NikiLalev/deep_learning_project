@@ -15,7 +15,7 @@ from datasets import Image as HFImage
 
 
 DEFAULT_PASCAL_PATH = "data/pascal_voc_yolo_448"
-DEFAULT_PASCAL_PATH = "/scratch/s4015843/data/pascal_voc_yolo_448"
+# DEFAULT_PASCAL_PATH = "/scratch/s4015843/data/pascal_voc_yolo_448"
 
 
 # =========================

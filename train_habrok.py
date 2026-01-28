@@ -70,7 +70,7 @@ class Config:
     LR_GAMMA: float = 0.1
 
     # Checkpointing / logging
-    SAVE_FREQUENCY: int = 5
+    SAVE_FREQUENCY: int = 20
     WEIGHT_DECAY: float = 1e-5
     USE_AMP: bool = True
 
@@ -151,9 +151,16 @@ def get_data_loaders(config: Config) -> Tuple[DataLoader, DataLoader]:
     train_ds = ds["train"]
     val_ds = ds["test"]  # original code uses test as val
 
+    # 80/20 split (deterministic with seed)
+    split = train_ds.train_test_split(test_size=0.2, seed=42)
+    train_ds = split["train"]
+    val_ds   = split["test"]   # HF uses "test" key for the held-out split
+
+    # Optional streaming support (note: train_test_split requires map-style dataset)
     if getattr(config, "STREAMING", False):
         train_ds = train_ds.to_iterable_dataset()
-        val_ds = val_ds.to_iterable_dataset()
+        val_ds   = val_ds.to_iterable_dataset()
+        test_ds  = test_ds.to_iterable_dataset()
 
     train_ds = train_ds.with_transform(_to_torch)
     val_ds = val_ds.with_transform(_to_torch)
@@ -353,6 +360,7 @@ def train_model(
     scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
     scaler: Optional[torch.cuda.amp.GradScaler],
     config: Config,
+    start_epoch: int = 1,
 ) -> Dict[str, List[float]]:
     history: Dict[str, List[float]] = {"train_loss": [], "val_loss": [], "lr": []}
     best_val_loss = float("inf")
@@ -366,7 +374,7 @@ def train_model(
     print(f"Optimizer: {config.OPTIMIZER}")
     print("=" * 60 + "\n")
 
-    for epoch in range(1, config.EPOCHS + 1):
+    for epoch in range(start_epoch, config.EPOCHS + 1):
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer, scaler, config, epoch)
         val_loss = validate(model, val_loader, criterion, config, epoch)
 
@@ -419,74 +427,19 @@ def train_model(
 
 def main() -> None:
     print_env()
-
     config = Config()
-    config_path = config.save_config()
+    config.save_config()
 
-    print("\n" + "=" * 60)
-    print("YOLO POSTTRAINING DETECTION - HABROK HPC")
-    print("Replicating YOLO (2016) Paper Settings")
-    print("=" * 60)
-    print(f"Config saved: {config_path}")
-    print(f"Device: {config.DEVICE}")
-    print(f"Batch Size: {config.BATCH_SIZE}")
-    print(f"Learning Rate: {config.LEARNING_RATE}")
-    print(f"Epochs: {config.EPOCHS}")
-    print(f"Optimizer: {config.OPTIMIZER}, weight_decay={config.WEIGHT_DECAY})")
-    print(f"LR Schedule: MultiStepLR (milestones={list(config.LR_MILESTONES)}, gamma={config.LR_GAMMA})")
-    print("=" * 60)
-
-    train_loader, val_loader = get_data_loaders(config)
+    # ... [Data loader and Logging code remains the same] ...
     train_loader, val_loader = get_data_loaders(config)
 
-    print("DEBUG: Testing data loader...")
-    try:
-        batch = next(iter(train_loader))
-        print(f"DEBUG: Batch loaded successfully! Keys: {batch.keys()}")
-    except Exception as e:
-        print(f"DEBUG: Failed to load batch! Error: {e}")
-        raise e
-
     print("\n" + "=" * 60)
-    print("INITIALIZING MODEL")
+    print("INITIALIZING MODEL & OPTIMIZER")
     print("=" * 60)
 
-    print("\nLoading pretrained ImageNet model...")
-    pretrain = YOLOPretrain(num_classes=20)
-    ckpt = torch.load("yolo_pretrain_manual.pth", map_location="cpu")
-    pretrain_state = pretrain.state_dict()
-    print([(k, v.shape) for k, v in ckpt.items()])
-
-    print(f"{'LAYER NAME':<40} | {'CHECKPOINT SHAPE':<20} | {'MODEL SHAPE':<20}")
-    print("-" * 85)
-
-    for name, param in ckpt.items():
-        if name in pretrain_state:
-            ckpt_shape = str(list(param.shape))
-            model_shape = str(list(pretrain_state[name].shape))
-            match = "✅" if ckpt_shape == model_shape else "❌ MISMATCH"
-            print(f"{name:<40} | {ckpt_shape:<20} | {model_shape:<20} {match}")
-        else:
-            print(f"{name:<40} | {str(list(param.shape)):<20} | {'MISSING IN MODEL':<20}")
-    pretrain.load_state_dict(ckpt)
-    pretrain.eval()
-    
-    print("Initializing YOLOv1 detector...")
+    # 1. Always initialize the base architecture first
     model = YOLOv1(split_size=7, num_boxes=2, num_classes=20)
-    model.load_pretrain_weights(pretrain)
-    model = model.to(config.DEVICE)
-
-    print(model) # Print model architecture
-
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Model: YOLOPretrain (First 20 conv layers from YOLO)")
-    print(f"Total Parameters: {total_params:,}")
-    print(f"Trainable Parameters: {trainable_params:,}")
-    print("=" * 60)
-
-    criterion = YOLOv1Loss(S=7, B=2, C=20).to(config.DEVICE)
-
+    
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=config.LEARNING_RATE,
@@ -500,7 +453,42 @@ def main() -> None:
     )
 
     scaler = torch.cuda.amp.GradScaler() if config.USE_AMP and torch.cuda.is_available() else None
+    criterion = YOLOv1Loss(S=7, B=2, C=20).to(config.DEVICE)
 
+    # 2. RESUME LOGIC
+    start_epoch = 1
+    latest_path = config.CHECKPOINT_DIR / "checkpoint_latest.pth"
+    
+    if latest_path.exists():
+        print(f"\n>>> Found checkpoint: {latest_path}. Resuming...")
+        checkpoint = torch.load(latest_path, map_location=config.DEVICE)
+        
+        model.load_state_dict(checkpoint["model_state_dict"], )
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        # 3. FIX: Move optimizer state tensors to GPU manually
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if torch.is_tensor(v):
+                    state[k] = v.to(config.DEVICE)
+
+        if scheduler and "scheduler_state_dict" in checkpoint:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        
+        start_epoch = checkpoint["epoch"] + 1
+        print(f">>> Successfully loaded. Resuming from Epoch {start_epoch}\n")
+    else:
+        print("\n>>> No checkpoint found. Loading ImageNet pretrain weights...")
+        pretrain = YOLOPretrain(num_classes=1000)
+        # Assuming this file is in your project root
+        # pretrain.load_state_dict(torch.load("yolo_pretrain_manual2.pth", map_location=config.DEVICE))
+        checkpoint_data = torch.load("yolo_pretrain_manual2.pth", map_location=config.DEVICE)
+        pretrain.load_state_dict(checkpoint_data["model_state_dict"], strict=False)
+        model.load_pretrain_weights(pretrain)
+
+    # 3. Move model to GPU after weights are loaded
+    model = model.to(config.DEVICE)
+
+    # 4. Start Training (CRITICAL: passing start_epoch)
     history = train_model(
         model=model,
         train_loader=train_loader,
@@ -510,8 +498,10 @@ def main() -> None:
         scheduler=scheduler,
         scaler=scaler,
         config=config,
+        start_epoch=start_epoch,
     )
 
+    # 5. Save final model
     final_model_path = CURRENT_DIR / "yolov1_voc.pth"
     torch.save(model.state_dict(), final_model_path)
 
