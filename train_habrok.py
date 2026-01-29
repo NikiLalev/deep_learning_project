@@ -146,6 +146,7 @@ def get_data_loaders(config: Config) -> Tuple[DataLoader, DataLoader, DataLoader
     print("LOADING PASCAL VOC DATASET")
     print("=" * 60)
 
+    # load dataset locally or habrok
     ds = load_from_disk("data/pascal_voc_yolo_448")
     # ds = load_from_disk("/scratch/s4015843/data/pascal_voc_yolo_448")
     train_ds = ds["train"]
@@ -153,14 +154,15 @@ def get_data_loaders(config: Config) -> Tuple[DataLoader, DataLoader, DataLoader
     # 80/20 split (deterministic with seed)
     split = train_ds.train_test_split(test_size=0.2, seed=42)
     train_ds = split["train"]
-    val_ds   = split["test"]   # HF uses "test" key for the held-out split
+    val_ds = split["test"]   # HF uses "test" key for the held-out split
 
     # Optional streaming support (note: train_test_split requires map-style dataset)
     if getattr(config, "STREAMING", False):
         train_ds = train_ds.to_iterable_dataset()
-        val_ds   = val_ds.to_iterable_dataset()
-        test_ds  = test_ds.to_iterable_dataset()
+        val_ds = val_ds.to_iterable_dataset()
+        test_ds = test_ds.to_iterable_dataset()
 
+    # transform to torch tensors
     train_ds = train_ds.with_transform(_to_torch)
     val_ds = val_ds.with_transform(_to_torch)
     test_ds = ds["test"].with_transform(_to_torch)
@@ -168,6 +170,7 @@ def get_data_loaders(config: Config) -> Tuple[DataLoader, DataLoader, DataLoader
     pin = torch.cuda.is_available()
     is_streaming = getattr(config, "STREAMING", False)
 
+    # Data loaders
     train_loader = DataLoader(
         train_ds,
         batch_size=config.BATCH_SIZE,
@@ -270,11 +273,14 @@ def train_one_epoch(
     total_images = 0
 
     pbar = tqdm(loader, desc=f"Epoch {epoch}/{config.EPOCHS} [Train]")
+
+    # Training loop
     for batch in pbar:
         images = batch["images"].to(config.DEVICE)
         boxes = [b.to(config.DEVICE) for b in batch["boxes"]]
         labels = [l.to(config.DEVICE) for l in batch["labels"]]
 
+        # build targets to which we will compare predictions
         targets = build_targets_yolov1(boxes, labels, S=7, B=2, C=20, device=config.DEVICE)
 
         optimizer.zero_grad(set_to_none=True)
@@ -308,6 +314,7 @@ def validate(
     config: Config,
     epoch: int,
 ) -> float:
+    """Validation loop. Returns average loss."""
     model.eval()
     running_loss = 0.0
     total_images = 0
@@ -339,6 +346,8 @@ def save_checkpoint(
     val_loss: float,
     config: Config,
 ) -> Path:
+    """Save model checkpoint."""
+
     checkpoint = {
         "epoch": int(epoch),
         "model_state_dict": model.state_dict(),
@@ -391,6 +400,7 @@ def train_model(
         if scheduler is not None:
             scheduler.step()
 
+        # save metrics to history
         history["train_loss"].append(float(train_loss))
         history["val_loss"].append(float(val_loss))
         history["lr"].append(float(current_lr))
@@ -402,6 +412,7 @@ def train_model(
 
         save_checkpoint(model, optimizer, scheduler, epoch, train_loss, val_loss, config)
 
+        # save best model
         if val_loss < best_val_loss:
             best_val_loss = float(val_loss)
             best_path = config.CHECKPOINT_DIR / "checkpoint_best.pth"
@@ -423,9 +434,9 @@ def train_model(
         # json.dump(history, f, indent=2)
         json.dump(history, f, indent=2, default=str)
 
-    print("\n✓ Training completed!")
-    print(f"✓ Best validation loss: {best_val_loss:.4f}")
-    print(f"✓ Training history saved to {history_path}")
+    print("\nTraining completed!")
+    print(f"Best validation loss: {best_val_loss:.4f}")
+    print(f"Training history saved to {history_path}")
 
     return history
 
@@ -467,7 +478,8 @@ def main() -> None:
     # 2. RESUME LOGIC
     start_epoch = 1
     latest_path = config.CHECKPOINT_DIR / "checkpoint_latest.pth"
-    
+
+    # continue training if stopped midway
     if latest_path.exists():
         print(f"\n>>> Found checkpoint: {latest_path}. Resuming...")
         checkpoint = torch.load(latest_path, map_location=config.DEVICE)

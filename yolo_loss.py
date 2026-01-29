@@ -10,6 +10,8 @@ def xywh_to_xyxy(xywh):
     return torch.stack([x1, y1, x2, y2], dim=-1)
 
 def iou_xyxy(box1, box2, eps=1e-6):
+    """Calculates IoU for boxes in [x1,y1,x2,y2] format."""
+
     x1 = torch.max(box1[..., 0], box2[..., 0])
     y1 = torch.max(box1[..., 1], box2[..., 1])
     x2 = torch.min(box1[..., 2], box2[..., 2])

@@ -26,6 +26,7 @@ VOC_CLASSES = [
 
 
 def mean_average_precision(pred_boxes, true_boxes, iou_threshold=0.5, num_classes=20):
+    """ Calculates mean average precision."""
     # pred_boxes format: [[train_idx, class_pred, prob_score, x1, y1, x2, y2], ...]
     average_precisions = []
     epsilon = 1e-6
@@ -146,6 +147,8 @@ def save_predictions(image, boxes, class_labels, output_folder, img_name):
     plt.close(fig) # Explicitly close figure to free memory on HPC
 
 def get_bboxes(loader, model, iou_threshold, threshold, device, S=7, B=2, C=20):
+    """Gets all predicted bounding boxes and all true bounding boxes for a dataset."""
+
     all_json_data = [] # New list to store data for JSON
     all_pred_boxes = []
     all_true_boxes = []
@@ -172,6 +175,8 @@ def get_bboxes(loader, model, iou_threshold, threshold, device, S=7, B=2, C=20):
         bboxes = cellboxes_to_boxes(predictions, S=S, B=B, C=C)
 
         for idx in range(batch_size):
+            
+            # apply NMS to filter overlapping boxes
             nms_boxes = non_max_suppression(
                 bboxes[idx],
                 iou_threshold=iou_threshold,
@@ -183,15 +188,8 @@ def get_bboxes(loader, model, iou_threshold, threshold, device, S=7, B=2, C=20):
                 "predictions": [],
                 "ground_truths": []
             }
-            if train_idx < 100:  # Save predictions for first 100 images only to limit output
-                save_predictions(
-                    image=x[idx], 
-                    boxes=nms_boxes, 
-                    class_labels=VOC_CLASSES, 
-                    output_folder="images", 
-                    img_name=f"pred_{train_idx}"
-                )
 
+            # Loop over all prediction
             for box in nms_boxes:
                 image_entry["predictions"].append({
                     "class": int(box[0]),
@@ -201,6 +199,7 @@ def get_bboxes(loader, model, iou_threshold, threshold, device, S=7, B=2, C=20):
                 if box[1] > threshold:
                     all_pred_boxes.append([train_idx] + box.tolist())
 
+            # Loop over all ground truth boxes
             for box in true_bboxes[idx]:
                 # many boxes will be empty (prob=0), only keep real ones
                 if box[1] > threshold:
