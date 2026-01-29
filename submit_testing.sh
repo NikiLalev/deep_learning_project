@@ -2,7 +2,7 @@
 #SBATCH --job-name=yolo_test
 #SBATCH --output=logs/yolo_test%j.out
 #SBATCH --error=logs/yolo_test%j.err
-#SBATCH --time=02:00:00
+#SBATCH --time=00:20:00
 #SBATCH --partition=gpushort
 #SBATCH --gres=gpu:v100:1
 #SBATCH --mem=64G

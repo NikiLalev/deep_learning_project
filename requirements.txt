@@ -8,3 +8,4 @@ datasets>=3.3.2
 huggingface_hub>=1.2.4
 tqdm>=4.65.0
 Pillow>=9.0.0
+scikit-learn==1.8.0

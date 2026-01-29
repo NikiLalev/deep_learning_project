@@ -146,10 +146,9 @@ def get_data_loaders(config: Config) -> Tuple[DataLoader, DataLoader, DataLoader
     print("LOADING PASCAL VOC DATASET")
     print("=" * 60)
 
-    # ds = load_from_disk("data/pascal_voc_yolo_448")
-    ds = load_from_disk("/scratch/s4015843/data/pascal_voc_yolo_448")
+    ds = load_from_disk("data/pascal_voc_yolo_448")
+    # ds = load_from_disk("/scratch/s4015843/data/pascal_voc_yolo_448")
     train_ds = ds["train"]
-    val_ds = ds["test"]  # original code uses test as val
 
     # 80/20 split (deterministic with seed)
     split = train_ds.train_test_split(test_size=0.2, seed=42)

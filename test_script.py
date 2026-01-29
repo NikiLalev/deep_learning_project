@@ -1,3 +1,4 @@
+import json
 import torch
 import numpy as np
 from tqdm import tqdm
@@ -145,6 +146,7 @@ def save_predictions(image, boxes, class_labels, output_folder, img_name):
     plt.close(fig) # Explicitly close figure to free memory on HPC
 
 def get_bboxes(loader, model, iou_threshold, threshold, device, S=7, B=2, C=20):
+    all_json_data = [] # New list to store data for JSON
     all_pred_boxes = []
     all_true_boxes = []
     model.eval()
@@ -176,6 +178,11 @@ def get_bboxes(loader, model, iou_threshold, threshold, device, S=7, B=2, C=20):
                 threshold=threshold,
                 box_format="midpoint",
             )
+            image_entry = {
+                "img_id": train_idx,
+                "predictions": [],
+                "ground_truths": []
+            }
             if train_idx < 100:  # Save predictions for first 100 images only to limit output
                 save_predictions(
                     image=x[idx], 
@@ -186,14 +193,31 @@ def get_bboxes(loader, model, iou_threshold, threshold, device, S=7, B=2, C=20):
                 )
 
             for box in nms_boxes:
-                all_pred_boxes.append([train_idx] + box.tolist())
+                image_entry["predictions"].append({
+                    "class": int(box[0]),
+                    "conf": round(float(box[1]), 4),
+                    "bbox": [round(float(val), 4) for val in box[2:]]
+                })
+                if box[1] > threshold:
+                    all_pred_boxes.append([train_idx] + box.tolist())
 
             for box in true_bboxes[idx]:
                 # many boxes will be empty (prob=0), only keep real ones
                 if box[1] > threshold:
+                    image_entry["ground_truths"].append({
+                        "class": int(box[0]),
+                        "bbox": [round(float(val), 4) for val in box[2:]]
+                    })
                     all_true_boxes.append([train_idx] + box.tolist())
-
+            
+            all_json_data.append(image_entry)
             train_idx += 1
+
+    # Save to file
+    with open("results.json", "w") as f:
+        json.dump(all_json_data, f, indent=4)
+
+    print(f"\nSaved results for {train_idx} images to results.json")
 
     return all_pred_boxes, all_true_boxes
 

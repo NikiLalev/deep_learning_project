@@ -67,3 +67,4 @@ venv/
 # Data
 data/
 huggingface_cache/
+visual_results/
