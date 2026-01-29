@@ -17,6 +17,7 @@ class YOLOv1(nn.Module):
             padding = kernel_size // 2
             return nn.Sequential(
                 # Bias is False because we use BatchNorm. Reason for using batch norm: https://github.com/pjreddie/darknet/blob/master/cfg/yolov1.cfg
+                # Also from the YOLO 9000 paper: " By adding batch normalization on all of the convolutional layers in YOLO we get more than 2% improvement in mAP"
                 nn.Conv2d(in_c, out_c, kernel_size, stride, padding, bias=False),
                 nn.BatchNorm2d(out_c),
                 # Paper uses Leaky ReLU for all layers except the final layer where linear activation is used
