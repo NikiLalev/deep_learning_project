@@ -61,12 +61,11 @@ class YOLOv1Loss(nn.Module):
         pred_xy2   = preds[..., C + 6:C + 8]
         pred_wh2   = preds[..., C + 8:C + 10]
 
-        # Paper doesn't mandate sigmoids; but we must keep x,y in [0,1) per cell.
-        # This is common & keeps training stable.
+        # keep x, y in [0,1)
         pred_xy1 = torch.sigmoid(pred_xy1)
         pred_xy2 = torch.sigmoid(pred_xy2)
 
-        # w,h should be >=0 in paper loss (sqrt). Use clamp to avoid abs kink.
+        # clamp such that width and height are non-negative
         pred_wh1 = pred_wh1.clamp(min=0.0)
         pred_wh2 = pred_wh2.clamp(min=0.0)
 
@@ -74,7 +73,7 @@ class YOLOv1Loss(nn.Module):
         pred_box2 = torch.cat([pred_xy2, pred_wh2], dim=-1)
 
         # Targets (same for both predictors)
-        tgt_box = targets[..., C + 1:C + 5]                  # [B,S,S,4] (x_cell,y_cell,w_img,h_img)
+        tgt_box = targets[..., C + 1:C + 5] # [B,S,S,4] (x_cell,y_cell,w_img,h_img)
 
         # -------- IoU to decide responsibility (paper: choose best predictor) --------
         grid_i = torch.arange(S, device=device).view(1, S, 1, 1).expand(Bsz, S, S, 1)
@@ -99,7 +98,7 @@ class YOLOv1Loss(nn.Module):
         resp1 = (iou1 >= iou2).float() * obj                  # [B,S,S]
         resp2 = (iou2 >  iou1).float() * obj
 
-        # -------- Localization loss (paper: x,y and sqrt(w),sqrt(h) for responsible) --------
+        # Localization loss
         def loc_loss(pred_box, resp):
             # x,y
             xy = ((pred_box[..., 0:2] - tgt_box[..., 0:2]) ** 2 * resp.unsqueeze(-1)).sum()
