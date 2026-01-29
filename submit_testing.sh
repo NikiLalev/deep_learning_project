@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=yolo_posttrain
-#SBATCH --output=logs/yolo_posttrain_%j.out
-#SBATCH --error=logs/yolo_posttrain_%j.err
-#SBATCH --time=06:00:00
+#SBATCH --job-name=yolo_test
+#SBATCH --output=logs/yolo_test%j.out
+#SBATCH --error=logs/yolo_test%j.err
+#SBATCH --time=02:00:00
 #SBATCH --partition=gpushort
 #SBATCH --gres=gpu:v100:1
 #SBATCH --mem=64G
@@ -38,8 +38,8 @@ source /scratch/$USER/envs/yolo_env/bin/activate
 # 4. Navigate to project
 cd $SLURM_SUBMIT_DIR
 
-# 5. Run Training
-echo "Starting YOLO pascal Posttraining..."
-python train_habrok.py
+# 5. Run testing
+echo "Starting YOLO testing..."
+python test_script.py
 
 echo "Job finished on $(date)"

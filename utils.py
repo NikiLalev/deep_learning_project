@@ -1,38 +1,60 @@
 import torch
 
-def cellboxes_to_boxes(out, S=7):
+def cellboxes_to_boxes(out, S=7, B=2, C=20):
     """
-    Converts YOLO output to bounding boxes relative to the entire image.
-    Assumes 'out' is (batch, S, S, 30) for YOLOv1.
+    Converts YOLO output [batch, S, S, 30] to [batch, S*S, 6]
+    Output format: [class_idx, confidence, x, y, w, h]
     """
-    converted_bboxes = out.reshape(out.shape[0], S, S, -1)
-    confidences1 = converted_bboxes[..., 0:1]
-    confidences2 = converted_bboxes[..., 5:6]
+    batch_size = out.shape[0]
+    device = out.device
+
+    # 1. Extract classes and confidences
+    # out shape: [batch, 7, 7, 30]
+    classes = out[..., :C].argmax(-1).unsqueeze(-1)  # [batch, 7, 7, 1]
     
-    # Take the box with the higher confidence
-    best_confidence, best_box = torch.max(torch.cat([confidences1, confidences2], dim=-1), dim=-1, keepdim=True)
+    conf1 = out[..., C:C+1]    # [batch, 7, 7, 1]
+    conf2 = out[..., C+5:C+6]  # [batch, 7, 7, 1]
     
-    # Extract x, y, w, h based on which box was "best"
-    # This is a simplified version; in full YOLO you might process both boxes for NMS
-    bboxes1 = converted_bboxes[..., 1:5]
-    bboxes2 = converted_bboxes[..., 6:10]
+    # 2. Select the best box (B1 or B2)
+    # best_box_idx will be 0 if box1 is better, 1 if box2 is better
+    _, best_box_idx = torch.max(torch.cat([conf1, conf2], dim=-1), dim=-1, keepdim=True)
+    best_conf = torch.max(conf1, conf2) # Higher confidence value
     
-    # Logic to select the best box's coordinates
-    best_bboxes = torch.where(best_box.unsqueeze(-1) == 0, bboxes1, bboxes2)
+    # 3. Extract x, y, w, h for both boxes
+    box1 = out[..., C+1:C+5]
+    box2 = out[..., C+6:C+10]
     
-    # Add cell indices to coordinates to make them global
-    cell_indices = torch.arange(S).repeat(out.shape[0], S, 1).unsqueeze(-1).to(out.device)
+    # Selection logic that avoids dimension errors
+    best_boxes = torch.where(best_box_idx == 0, box1, box2)
+
+    # 4. Global Coordinate Transformation
+    # We need to add the cell offset (0..6) to the cell-relative (x, y)
     
-    x = (best_bboxes[..., 0:1] + cell_indices) / S
-    y = (best_bboxes[..., 1:2] + cell_indices.permute(0, 2, 1, 3)) / S
-    w_y = best_bboxes[..., 2:4] / S  # widths/heights are already relative to image usually
+    # Create a 1D range [0, 1, 2, 3, 4, 5, 6]
+    cell_range = torch.arange(S).to(device)
     
-    converted_bboxes = torch.cat((x, y, w_y), dim=-1)
+    # Create the 2D grid offsets
+    # x_off: [[0,1,2,3,4,5,6], [0,1,2,3,4,5,6], ...] -> columns
+    # y_off: [[0,0,0...], [1,1,1...], ...] -> rows
+    x_off = cell_range.repeat(S, 1).unsqueeze(0).unsqueeze(-1)      # [1, 7, 7, 1]
+    y_off = cell_range.repeat(S, 1).t().unsqueeze(0).unsqueeze(-1)  # [1, 7, 7, 1]
+
+    # Calculate global x, y
+    # (local_x + cell_column_index) / 7
+    x = (best_boxes[..., 0:1] + x_off) / S
+    y = (best_boxes[..., 1:2] + y_off) / S
     
-    # Get predicted class
-    predicted_class = converted_bboxes[..., 10:].argmax(-1, keepdim=True)
+    # w, h are already image-relative (0..1) in YOLOv1
+    w = best_boxes[..., 2:3]
+    h = best_boxes[..., 3:4]
+
+    # 5. Final Assembly
+    # Concatenate: [class, conf, x, y, w, h]
+    # Final shape: [batch, 7, 7, 6]
+    converted_bboxes = torch.cat((classes.float(), best_conf, x, y, w, h), dim=-1)
     
-    return torch.cat((predicted_class, best_confidence, converted_bboxes), dim=-1)
+    # Flatten grid dimensions: [batch, 49, 6]
+    return converted_bboxes.reshape(batch_size, S * S, 6)
 
 def non_max_suppression(bboxes, iou_threshold, threshold, box_format="midpoint"):
     """

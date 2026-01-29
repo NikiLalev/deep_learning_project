@@ -62,7 +62,7 @@ class Config:
     # Data parameters
     TRAIN_N: Optional[int] = None
     VAL_N: Optional[int] = None
-    NUM_WORKERS: int = 0
+    NUM_WORKERS: int = 8
 
     # LR schedule
     USE_LR_SCHEDULER: bool = True
@@ -71,7 +71,7 @@ class Config:
 
     # Checkpointing / logging
     SAVE_FREQUENCY: int = 20
-    WEIGHT_DECAY: float = 1e-5
+    WEIGHT_DECAY: float = 1e-4
     USE_AMP: bool = True
 
     # Paths
@@ -141,7 +141,7 @@ def _to_torch(example: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def get_data_loaders(config: Config) -> Tuple[DataLoader, DataLoader]:
+def get_data_loaders(config: Config) -> Tuple[DataLoader, DataLoader, DataLoader]:
     print("\n" + "=" * 60)
     print("LOADING PASCAL VOC DATASET")
     print("=" * 60)
@@ -164,6 +164,7 @@ def get_data_loaders(config: Config) -> Tuple[DataLoader, DataLoader]:
 
     train_ds = train_ds.with_transform(_to_torch)
     val_ds = val_ds.with_transform(_to_torch)
+    test_ds = ds["test"].with_transform(_to_torch)
 
     pin = torch.cuda.is_available()
     is_streaming = getattr(config, "STREAMING", False)
@@ -186,7 +187,16 @@ def get_data_loaders(config: Config) -> Tuple[DataLoader, DataLoader]:
         collate_fn=_collate_yolo,
     )
 
-    return train_loader, val_loader
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=config.BATCH_SIZE,
+        num_workers=config.NUM_WORKERS,
+        pin_memory=pin,
+        shuffle=False,
+        collate_fn=_collate_yolo,
+    )
+
+    return train_loader, val_loader, test_loader
 
 
 # ============================================================================
@@ -431,7 +441,7 @@ def main() -> None:
     config.save_config()
 
     # ... [Data loader and Logging code remains the same] ...
-    train_loader, val_loader = get_data_loaders(config)
+    train_loader, val_loader, _ = get_data_loaders(config)
 
     print("\n" + "=" * 60)
     print("INITIALIZING MODEL & OPTIMIZER")
@@ -481,7 +491,7 @@ def main() -> None:
         pretrain = YOLOPretrain(num_classes=1000)
         # Assuming this file is in your project root
         # pretrain.load_state_dict(torch.load("yolo_pretrain_manual2.pth", map_location=config.DEVICE))
-        checkpoint_data = torch.load("yolo_pretrain_manual2.pth", map_location=config.DEVICE)
+        checkpoint_data = torch.load("yolo_pretrain_manual3.pth", map_location=config.DEVICE)
         pretrain.load_state_dict(checkpoint_data["model_state_dict"], strict=False)
         model.load_pretrain_weights(pretrain)
 

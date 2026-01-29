@@ -102,19 +102,25 @@ def build_pascal_voc_yolo(
 
     print("Applying preprocess_yolo...")
 
-    num_cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", 1))
+    num_cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", 8))
     print("  num_cpus:", num_cpus)
     train_ds = train_ds.map(
         preprocess_yolo,
         fn_kwargs={"img_size": img_size},
         remove_columns=train_ds.column_names,
-        num_proc=num_cpus
+        num_proc=num_cpus,
+        batched=True,      # Process in batches
+        batch_size=100,    # Smaller batches prevent RAM spikes
+        writer_batch_size=100
     )
     test_ds = test_ds.map(
         preprocess_yolo,
         fn_kwargs={"img_size": img_size},
         remove_columns=test_ds.column_names,
-        num_proc=num_cpus
+        num_proc=num_cpus,
+        batched=True,      # Process in batches
+        batch_size=100,    # Smaller batches prevent RAM spikes
+        writer_batch_size=100
     )
 
     train_ds = train_ds.cast_column("image", HFImage())

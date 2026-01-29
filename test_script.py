@@ -13,7 +13,8 @@ import matplotlib
 matplotlib.use('Agg')
 import os
 
-from src.model.YOLOv1 import YOLOv1
+from src.model.detector import YOLOv1
+from train_habrok import build_targets_yolov1, get_data_loaders, Config  # Assuming test_loader is defined in train_habrok.py
 
 
 VOC_CLASSES = [
@@ -81,68 +82,92 @@ def mean_average_precision(pred_boxes, true_boxes, iou_threshold=0.5, num_classe
 def save_predictions(image, boxes, class_labels, output_folder, img_name):
     """
     image: Tensor of shape (3, H, W)
-    boxes: List of [class_pred, prob_score, x1, y1, x2, y2]
+    boxes: List of Tensors or Lists [class_pred, prob_score, xc, yc, w, h]
     """
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
 
-    # Convert tensor to numpy for plotting
+    # 1. Convert tensor to numpy and fix format
+    # permute: (C, H, W) -> (H, W, C)
     image = image.permute(1, 2, 0).cpu().numpy()
     
-    fig, ax = plt.subplots(1)
+    # IMPORTANT: If your data was normalized (0-1), ensure it stays in range.
+    # If you used ImageNet normalization, you'd need to multiply by std and add mean here.
+    image = np.clip(image, 0, 1) 
+
+    height, width, _ = image.shape
+    
+    fig, ax = plt.subplots(1, figsize=(8, 8))
     ax.imshow(image)
 
     for box in boxes:
+        # Convert to list if it's a tensor
+        if torch.is_tensor(box):
+            box = box.tolist()
+            
         class_idx = int(box[0])
         prob = box[1]
-        # Coordinates (assuming midpoint format normalized 0-1)
-        # You may need to rescale these by image.shape[0] and image.shape[1]
-        x, y, w, h = box[2], box[3], box[4], box[5]
-        
-        # Calculate top-left for matplotlib
-        upper_left_x = (x - w / 2) * image.shape[1]
-        upper_left_y = (y - h / 2) * image.shape[0]
+        xc, yc, w, h = box[2], box[3], box[4], box[5]
+
+        # 2. Convert Midpoint (normalized 0-1) to Corner (pixel coordinates)
+        # matplotlib.patches.Rectangle needs the bottom-left corner (x, y)
+        pixel_w = w * width
+        pixel_h = h * height
+        upper_left_x = (xc * width) - (pixel_w / 2)
+        upper_left_y = (yc * height) - (pixel_h / 2)
+
+        # 3. Create the rectangle
         rect = patches.Rectangle(
             (upper_left_x, upper_left_y),
-            w * image.shape[1],
-            h * image.shape[0],
+            pixel_w,
+            pixel_h,
             linewidth=2,
-            edgecolor="red",
+            edgecolor="lime", # Using lime for better visibility
             facecolor="none",
         )
         ax.add_patch(rect)
-        plt.text(
+
+        # 4. Add the label text
+        label_text = f"{class_labels[class_idx]} {prob:.2f}"
+        ax.text(
             upper_left_x,
-            upper_left_y,
-            s=f"{class_labels[class_idx]} {prob:.2f}",
+            upper_left_y - 5, # Position text slightly above the box
+            s=label_text,
             color="white",
-            verticalalignment="top",
-            bbox={"color": "red", "pad": 0},
+            fontsize=10,
+            fontweight="bold",
+            bbox={"facecolor": "lime", "alpha": 0.5, "pad": 1},
         )
 
     plt.axis("off")
-    plt.savefig(os.path.join(output_folder, f"{img_name}.png"), bbox_inches='tight')
-    plt.close()
-    
+    save_path = os.path.join(output_folder, f"{img_name}.png")
+    plt.savefig(save_path, bbox_inches='tight', pad_inches=0)
+    plt.close(fig) # Explicitly close figure to free memory on HPC
+
 def get_bboxes(loader, model, iou_threshold, threshold, device, S=7, B=2, C=20):
-    model.eval()
     all_pred_boxes = []
     all_true_boxes = []
+    model.eval()
     train_idx = 0
 
-    print(">>> Predicting bboxes...")
-    for batch_idx, (x, labels) in enumerate(tqdm(loader)):
-        x = x.to(device)
-        labels = labels.to(device)
+    for batch in tqdm(loader):
+        # 1. Correct the 'images' key from your previous error
+        x = batch["images"].to(device)
+        boxes = [b.to(device) for b in batch["boxes"]]
+        labels = [l.to(device) for l in batch["labels"]]
+
+        # 2. Build the target grid
+        # This converts list of tensors -> [Batch, 7, 7, 30]
+        targets = build_targets_yolov1(boxes, labels, S=S, B=B, C=C, device=device)
 
         with torch.no_grad():
             predictions = model(x)
 
         batch_size = x.shape[0]
-        # Convert raw tensor to a list of bounding boxes
-        # Format: [train_idx, class_prediction, prob_score, x1, y1, x2, y2]
+        
+        # Now both predictions and targets are in the same [B, 7, 7, 30] format
+        true_bboxes = cellboxes_to_boxes(targets, S=S, B=B, C=C)
         bboxes = cellboxes_to_boxes(predictions, S=S, B=B, C=C)
-        true_bboxes = cellboxes_to_boxes(labels, S=S, B=B, C=C)
 
         for idx in range(batch_size):
             nms_boxes = non_max_suppression(
@@ -151,18 +176,27 @@ def get_bboxes(loader, model, iou_threshold, threshold, device, S=7, B=2, C=20):
                 threshold=threshold,
                 box_format="midpoint",
             )
+            if train_idx < 100:  # Save predictions for first 100 images only to limit output
+                save_predictions(
+                    image=x[idx], 
+                    boxes=nms_boxes, 
+                    class_labels=VOC_CLASSES, 
+                    output_folder="images", 
+                    img_name=f"pred_{train_idx}"
+                )
 
             for box in nms_boxes:
-                all_pred_boxes.append([train_idx] + box)
+                all_pred_boxes.append([train_idx] + box.tolist())
 
             for box in true_bboxes[idx]:
-                # only keep actual objects (prob > threshold)
+                # many boxes will be empty (prob=0), only keep real ones
                 if box[1] > threshold:
-                    all_true_boxes.append([train_idx] + box)
+                    all_true_boxes.append([train_idx] + box.tolist())
 
             train_idx += 1
-            
+
     return all_pred_boxes, all_true_boxes
+
 
 def main():
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -170,12 +204,16 @@ def main():
     model = YOLOv1(split_size=7, num_boxes=2, num_classes=20).to(DEVICE)
     
     # Load the Post-train checkpoint
-    checkpoint = torch.load("checkpoints/checkpoint_best.pth", map_location=DEVICE)
+    checkpoint = torch.load("checkpoints/checkpoint_best_prev.pth", map_location=DEVICE)
     model.load_state_dict(checkpoint["model_state_dict"])
     
+    train_loader, val_loader, test_loader = get_data_loaders(Config())  # Assuming this function returns test_loader too
     # Get boxes
-    pred_boxes, true_boxes = get_bboxes(test_loader, model, iou_threshold=0.5, threshold=0.4, device=DEVICE)
+    pred_boxes, true_boxes = get_bboxes(test_loader, model, iou_threshold=0.5, threshold=0.05, device=DEVICE)
 
     # Calculate mAP
-    map_score = mean_average_precision(pred_boxes, true_boxes, iou_threshold=0.5, box_format="midpoint")
+    map_score = mean_average_precision(pred_boxes, true_boxes, iou_threshold=0.5, num_classes=20)
     print(f"Mean Average Precision: {map_score}")
+
+if __name__ == "__main__":
+    main()
