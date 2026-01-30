@@ -8,6 +8,8 @@ from datasets import load_dataset
 from torchvision import transforms
 from PIL import Image
 import os
+import io
+import numpy as np
 
 def get_imagenet_transforms(split='train'):
     if split == 'train':
@@ -28,11 +30,20 @@ def get_imagenet_transforms(split='train'):
 
 def preprocess_imagenet(example, transform):
     image = example['image']
-    if not isinstance(image, Image.Image):
+    # If image is a dict, extract the bytes and convert to PIL Image
+    if isinstance(image, dict):
+        if 'bytes' in image:
+            image = Image.open(io.BytesIO(image['bytes'])).convert('RGB')
+        elif 'path' in image:
+            image = Image.open(image['path']).convert('RGB')
+        else:
+            raise ValueError("Unknown image dict format in example['image']")
+    elif isinstance(image, np.ndarray):
         image = Image.fromarray(image)
+    elif not isinstance(image, Image.Image):
+        raise ValueError(f"Unsupported image type: {type(image)}")
     if image.mode != 'RGB':
         image = image.convert('RGB')
-    
     example['image'] = transform(image)
     return example
 
