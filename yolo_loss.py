@@ -45,11 +45,10 @@ class YOLOv1Loss(nn.Module):
         obj = (targets[..., C] > 0).float()                 # [B,S,S]
         noobj = 1.0 - obj                                   # [B,S,S]
 
-        # -------- Class loss (paper eq: sum_i 1^obj_i sum_c (p_i(c)-p̂_i(c))^2 ) --------
+        # Classification loss
         pred_class = preds[..., :C]                          # raw scores (no softmax)
         class_loss = ((pred_class - targets[..., :C]) ** 2 * obj.unsqueeze(-1)).sum()
 
-        # -------- Decode predicted boxes (cell-relative x,y; image-relative w,h) --------
         # coords are at [conf, x, y, w, h]
         # box1
         pred_conf1 = preds[..., C + 0]                       # raw conf
@@ -75,7 +74,7 @@ class YOLOv1Loss(nn.Module):
         # Targets (same for both predictors)
         tgt_box = targets[..., C + 1:C + 5] # [B,S,S,4] (x_cell,y_cell,w_img,h_img)
 
-        # -------- IoU to decide responsibility (paper: choose best predictor) --------
+        # IoU to decide responsibility 
         grid_i = torch.arange(S, device=device).view(1, S, 1, 1).expand(Bsz, S, S, 1)
         grid_j = torch.arange(S, device=device).view(1, 1, S, 1).expand(Bsz, S, S, 1)
 
@@ -110,8 +109,7 @@ class YOLOv1Loss(nn.Module):
 
         loc = self.lc * (loc_loss(pred_box1, resp1) + loc_loss(pred_box2, resp2))
 
-        # -------- Confidence loss (paper: (C - Ĉ)^2; target C is IoU for responsible) --------
-        # Paper uses MSE; we keep conf raw (no sigmoid) for paper-closest behavior.
+        # object confidence loss for BOTH predictors in cells with objects
         conf_loss_obj = (
             ((pred_conf1 - iou1) ** 2 * resp1).sum()
             + ((pred_conf2 - iou2) ** 2 * resp2).sum()
