@@ -68,3 +68,7 @@ venv/
 data/
 huggingface_cache/
 visual_results/
+top_fps/
+top_results/
+top_tp_ratio/
+top_avg_results/

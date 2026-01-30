@@ -81,7 +81,7 @@ def mean_average_precision(pred_boxes, true_boxes, iou_threshold=0.5, num_classe
 
     return sum(average_precisions) / len(average_precisions)
 
-def save_predictions(image, boxes, class_labels, output_folder, img_name):
+def save_predictions(image, boxes, class_labels, output_folder, img_name, typepred="predictions"):
     """
     image: Tensor of shape (3, H, W)
     boxes: List of Tensors or Lists [class_pred, prob_score, xc, yc, w, h]
@@ -93,8 +93,6 @@ def save_predictions(image, boxes, class_labels, output_folder, img_name):
     # permute: (C, H, W) -> (H, W, C)
     image = image.permute(1, 2, 0).cpu().numpy()
     
-    # IMPORTANT: If your data was normalized (0-1), ensure it stays in range.
-    # If you used ImageNet normalization, you'd need to multiply by std and add mean here.
     image = np.clip(image, 0, 1) 
 
     height, width, _ = image.shape
@@ -118,19 +116,22 @@ def save_predictions(image, boxes, class_labels, output_folder, img_name):
         upper_left_x = (xc * width) - (pixel_w / 2)
         upper_left_y = (yc * height) - (pixel_h / 2)
 
+        col = "lime" if typepred=="GT" else "red"
+
         # 3. Create the rectangle
         rect = patches.Rectangle(
             (upper_left_x, upper_left_y),
             pixel_w,
             pixel_h,
             linewidth=2,
-            edgecolor="lime", # Using lime for better visibility
+            edgecolor=col, # Using lime for better visibility
             facecolor="none",
         )
+
         ax.add_patch(rect)
 
-        # 4. Add the label text
-        label_text = f"{class_labels[class_idx]} {prob:.2f}"
+        # 4. Add the label text 
+        label_text = f"{class_labels[class_idx]} {prob:.2f}" if typepred=="predictions" else f"{class_labels[class_idx]}"
         ax.text(
             upper_left_x,
             upper_left_y - 5, # Position text slightly above the box
@@ -138,7 +139,7 @@ def save_predictions(image, boxes, class_labels, output_folder, img_name):
             color="white",
             fontsize=10,
             fontweight="bold",
-            bbox={"facecolor": "lime", "alpha": 0.5, "pad": 1},
+            bbox={"facecolor": col, "alpha": 0.5, "pad": 1},
         )
 
     plt.axis("off")
@@ -227,7 +228,7 @@ def main():
     model = YOLOv1(split_size=7, num_boxes=2, num_classes=20).to(DEVICE)
     
     # Load the Post-train checkpoint
-    checkpoint = torch.load("checkpoints/checkpoint_best_prev.pth", map_location=DEVICE)
+    checkpoint = torch.load("checkpoints/checkpoint_best.pth", map_location=DEVICE)
     model.load_state_dict(checkpoint["model_state_dict"])
     
     train_loader, val_loader, test_loader = get_data_loaders(Config())  # Assuming this function returns test_loader too

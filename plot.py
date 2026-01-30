@@ -19,7 +19,8 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -408,36 +409,374 @@ def calculate_map(json_path: str | os.PathLike, iou_threshold: float = 0.5, num_
     print("mAP (all):    ", compute_map_for_subset(preds, gt_all).item())
 
 
+def calculate_iou(box1, box2):
+    """ Calculates IoU of two boxes: [xc, yc, w, h] normalized """
+    # Convert to [x1, y1, x2, y2]
+    b1_x1, b1_x2 = box1[0] - box1[2] / 2, box1[0] + box1[2] / 2
+    b1_y1, b1_y2 = box1[1] - box1[3] / 2, box1[1] + box1[3] / 2
+    b2_x1, b2_x2 = box2[0] - box2[2] / 2, box2[0] + box2[2] / 2
+    b2_y1, b2_y2 = box2[1] - box2[3] / 2, box2[1] + box2[3] / 2
+
+    inter_x1 = max(b1_x1, b2_x1)
+    inter_y1 = max(b1_y1, b2_y1)
+    inter_x2 = min(b1_x2, b2_x2)
+    inter_y2 = min(b1_y2, b2_y2)
+
+    inter_area = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
+    union_area = (box1[2] * box1[3]) + (box2[2] * box2[3]) - inter_area
+    return inter_area / (union_area + 1e-6)
+
+def save_top_9_tps_separately(json_path, loader, VOC_CLASSES, output_folder="top_results", threshold=0.4):
+    # 1. Load data
+    with open(json_path, "r") as f:
+        data = json.load(f)
+
+    scored_images = []
+    
+    # We'll use a dictionary for quick lookup of ground truths by img_id
+    gt_lookup = {entry["img_id"]: entry["ground_truths"] for entry in data}
+
+    # 2. Calculate Max IoU for each image
+    print("Calculating IoU scores...")
+    
+    for entry in data:
+        avg_iou = 0
+        max_iou = 0
+        for p in entry["predictions"]:
+            if p.get("conf", 0.0) < threshold: continue 
+            
+            for gt in entry["ground_truths"]:
+                if p["class"] == gt["class"]:
+                    p_box = torch.tensor(p["bbox"]).unsqueeze(0)
+                    gt_box = torch.tensor(gt["bbox"]).unsqueeze(0)
+                    iou = intersection_over_union(p_box, gt_box, box_format="midpoint")
+                    max_iou = max(max_iou, iou.item())
+        
+        scored_images.append({
+            "img_id": entry["img_id"],
+            "max_iou": max_iou,
+            "predictions": entry["predictions"] 
+        })
+
+    # 3. Sort by IoU descending and take top 9
+    scored_images.sort(key=lambda x: x["max_iou"], reverse=True)
+    top_9 = scored_images[:9]
+
+    # 4. Save Prediction AND Ground Truth individually
+    print(f"Saving top 9 results to {output_folder}...")
+
+    for i, item in enumerate(top_9):
+        img_id = item["img_id"]
+        sample = loader.dataset[img_id]
+        image_tensor = sample["image"] 
+        
+        # --- Save Predictions ---
+        preds_to_draw = [
+            [p["class"], p["conf"]] + p["bbox"] 
+            for p in item["predictions"] if p.get("conf", 0.0) > threshold
+        ]
+        save_predictions(
+            image=image_tensor,
+            boxes=preds_to_draw,
+            class_labels=VOC_CLASSES,
+            output_folder=output_folder,
+            img_name=f"top_{i+1}_PRED"
+        )
+
+        # --- Save Ground Truths ---
+        # Note: We assign a fake confidence of 1.0 so save_predictions doesn't filter them out
+        gts_to_draw = [
+            [gt["class"], 1.0] + gt["bbox"] 
+            for gt in gt_lookup[img_id]
+        ]
+        save_predictions(
+            image=image_tensor,
+            boxes=gts_to_draw,
+            class_labels=VOC_CLASSES,
+            output_folder=output_folder,
+            img_name=f"top_{i+1}_GT",
+            typepred="GT"
+        )
+
+    print(f"Done! Check the '{output_folder}' folder for PRED and GT files.")
+
+def save_top_9_avg_iou_separately(json_path, loader, VOC_CLASSES, output_folder="top_avg_results", threshold=0.4):
+    # 1. Load data
+    with open(json_path, "r") as f:
+        data = json.load(f)
+
+    scored_images = []
+    gt_lookup = {entry["img_id"]: entry["ground_truths"] for entry in data}
+
+    print("Calculating Average IoU scores...")
+
+    for entry in data:
+        ious = []
+        # Find matches for each prediction to calculate localized accuracy
+        for p in entry["predictions"]:
+            if p.get("conf", 0.0) < threshold: 
+                continue 
+            
+            best_iou_for_p = 0
+            for gt in entry["ground_truths"]:
+                if p["class"] == gt["class"]:
+                    p_box = torch.tensor(p["bbox"]).unsqueeze(0)
+                    gt_box = torch.tensor(gt["bbox"]).unsqueeze(0)
+                    iou = intersection_over_union(p_box, gt_box, box_format="midpoint")
+                    current_iou = iou.item()
+                    if current_iou > best_iou_for_p:
+                        best_iou_for_p = current_iou
+            
+            # Only count predictions that actually matched a ground truth (IoU > 0)
+            if best_iou_for_p > 0:
+                ious.append(best_iou_for_p)
+        
+        # Calculate average IoU for the image
+        avg_iou = sum(ious) / len(ious) if ious else 0
+        
+        scored_images.append({
+            "img_id": entry["img_id"],
+            "avg_iou": avg_iou,
+            "predictions": entry["predictions"] 
+        })
+
+    # 3. Sort by Average IoU descending
+    scored_images.sort(key=lambda x: x["avg_iou"], reverse=True)
+    top_9 = scored_images[:9]
+
+    # 4. Save results
+    print(f"Saving top 9 average results to {output_folder}...")
+
+    for i, item in enumerate(top_9):
+        img_id = item["img_id"]
+        sample = loader.dataset[img_id]
+        image_tensor = sample["image"] 
+        
+        # Save Predictions
+        preds_to_draw = [
+            [p["class"], p["conf"]] + p["bbox"] 
+            for p in item["predictions"] if p.get("conf", 0.0) > threshold
+        ]
+        save_predictions(
+            image=image_tensor,
+            boxes=preds_to_draw,
+            class_labels=VOC_CLASSES,
+            output_folder=output_folder,
+            img_name=f"top_{i+1}_PRED_avg_{item['avg_iou']:.2f}",
+            typepred="pred"
+        )
+
+        # Save Ground Truths
+        gts_to_draw = [
+            [gt["class"], 1.0] + gt["bbox"] 
+            for gt in gt_lookup[img_id]
+        ]
+        save_predictions(
+            image=image_tensor,
+            boxes=gts_to_draw,
+            class_labels=VOC_CLASSES,
+            output_folder=output_folder,
+            img_name=f"top_{i+1}_GT",
+            typepred="GT"
+        )
+
+    print(f"Done! Average localization results saved to '{output_folder}'.")
+
+def save_top_9_tp_ratio_separately(json_path, loader, VOC_CLASSES, output_folder="top_tp_ratio", threshold=0.4):
+    with open(json_path, "r") as f:
+        data = json.load(f)
+
+    scored_images = []
+    gt_lookup = {entry["img_id"]: entry["ground_truths"] for entry in data}
+
+    print("Calculating TP Ratios per image...")
+    
+    for entry in data:
+        tp_count = 0
+        conf_preds = [p for p in entry["predictions"] if p.get("conf", 0.0) > threshold]
+        
+        if not conf_preds:
+            ratio = 0
+        else:
+            # Check each prediction to see if it qualifies as a TP
+            for p in conf_preds:
+                is_tp = False
+                for gt in entry["ground_truths"]:
+                    if p["class"] == gt["class"]:
+                        p_box = torch.tensor(p["bbox"]).unsqueeze(0)
+                        gt_box = torch.tensor(gt["bbox"]).unsqueeze(0)
+                        iou = intersection_over_union(p_box, gt_box, box_format="midpoint")
+                        
+                        if iou.item() >= 0.5: # Standard TP threshold
+                            is_tp = True
+                            break # Found a match for this prediction
+                
+                if is_tp:
+                    tp_count += 1
+            
+            ratio = tp_count / len(conf_preds)
+        
+        scored_images.append({
+            "img_id": entry["img_id"],
+            "tp_ratio": ratio,
+            "predictions": entry["predictions"] 
+        })
+
+    # Sort by TP Ratio descending. 
+    # If ratios are tied, it sorts by img_id as a secondary tie-breaker.
+    scored_images.sort(key=lambda x: x["tp_ratio"], reverse=True)
+    top_9 = scored_images[:9]
+
+    print(f"Saving top 9 results by ratio to {output_folder}...")
+
+    for i, item in enumerate(top_9):
+        img_id = item["img_id"]
+        sample = loader.dataset[img_id]
+        image_tensor = sample["image"] 
+
+        # --- Save Predictions ---
+        preds_to_draw = [
+            [p["class"], p["conf"]] + p["bbox"] 
+            for p in item["predictions"] if p.get("conf", 0.0) > threshold
+        ]
+        save_predictions(
+            image=image_tensor,
+            boxes=preds_to_draw,
+            class_labels=VOC_CLASSES,
+            output_folder=output_folder,
+            img_name=f"ratio_top_{i+1}_score_{item['tp_ratio']:.2f}",
+            typepred="predictions"
+        )
+
+        # --- Save Ground Truths ---
+        gts_to_draw = [
+            [gt["class"], 1.0] + gt["bbox"] 
+            for gt in gt_lookup[img_id]
+        ]
+        save_predictions(
+            image=image_tensor,
+            boxes=gts_to_draw,
+            class_labels=VOC_CLASSES,
+            output_folder=output_folder,
+            img_name=f"ratio_top_{i+1}_GT",
+            typepred="GT"
+        )
+
+    print(f"Done! Check the '{output_folder}' folder.")
+
+
+def save_top_9_fps_separately(json_path, loader, VOC_CLASSES, output_folder="top_fps", threshold=0.4, iou_threshold=0.5):
+    with open(json_path, "r") as f:
+        data = json.load(f)
+
+    scored_images = []
+    gt_lookup = {entry["img_id"]: entry["ground_truths"] for entry in data}
+
+    print("Counting False Positives per image...")
+    
+    for entry in data:
+        img_id = entry["img_id"]
+        predictions = [p for p in entry["predictions"] if p.get("conf", 0.0) > threshold]
+        gts = entry["ground_truths"]
+        fp_count = 0
+
+        for p in predictions:
+            is_tp = False
+            # A prediction is only a TP if it matches a GT of same class + high IoU
+            for gt in gts:
+                if p["class"] == gt["class"]:
+                    p_box = torch.tensor(p["bbox"]).unsqueeze(0)
+                    gt_box = torch.tensor(gt["bbox"]).unsqueeze(0)
+                    iou = intersection_over_union(p_box, gt_box, box_format="midpoint").item()
+                    
+                    if iou >= iou_threshold:
+                        is_tp = True
+                        break 
+            
+            if not is_tp:
+                fp_count += 1
+        
+        scored_images.append({
+            "img_id": img_id,
+            "fp_count": fp_count,
+            "predictions": entry["predictions"]
+        })
+
+    # Sort by fp_count descending (images with most hallucinations first)
+    scored_images.sort(key=lambda x: x["fp_count"], reverse=True)
+    top_9 = scored_images[:9]
+
+    print(f"Saving top 9 FP-heavy images to {output_folder}...")
+
+    for i, item in enumerate(top_9):
+        img_id = item["img_id"]
+        sample = loader.dataset[img_id]
+        image_tensor = sample["image"]
+
+        # 1. Prepare Predictions (Red - mostly FPs)
+        preds_to_draw = [[p["class"], p["conf"]] + p["bbox"] for p in item["predictions"] if p.get("conf", 0.0) > threshold]
+        
+        save_predictions(
+            image=image_tensor,
+            boxes=preds_to_draw,
+            class_labels=VOC_CLASSES,
+            output_folder=output_folder,
+            img_name=f"fp_rank_{i+1}",
+            typepred="predictions"
+        )
+
+        # 2. Prepare GTs (Green - to see what was actually there)
+        gts_to_draw = [[g["class"], 1.0] + g["bbox"] for g in gt_lookup[img_id]]
+        
+        save_predictions(
+            image=image_tensor,
+            boxes=gts_to_draw,
+            class_labels=VOC_CLASSES,
+            output_folder=output_folder,
+            img_name=f"fp_rank_{i+1}_GT",
+            typepred="GT"
+        )
+
+    print(f"Done! Check the '{output_folder}' folder.")
 
 def main() -> None:
-    json_path = Path("training_history_20260128_223854.json")
-    out_dir = Path("plots")
+    # json_path = Path("training_history_20260129_110725.json")
+    # out_dir = Path("plots")
 
-    history = load_history(json_path)
-    ensure_dir(out_dir)
+    # history = load_history(json_path)
+    # ensure_dir(out_dir)
 
-    train_loss = history["train_loss"]
-    val_loss = history["val_loss"]
+    # train_loss = history["train_loss"]
+    # val_loss = history["val_loss"]
 
-    plot_train_vs_val(train_loss, val_loss, out_dir)
-    plot_single(train_loss, "Training Loss", "Loss", "train_loss.pdf", out_dir)
-    plot_single(val_loss, "Validation Loss", "Loss", "val_loss.pdf", out_dir)
+    # plot_train_vs_val(train_loss, val_loss, out_dir)
+    # plot_single(train_loss, "Training Loss", "Loss", "train_loss.pdf", out_dir)
+    # plot_single(val_loss, "Validation Loss", "Loss", "val_loss.pdf", out_dir)
 
-    print(f"Saved plots to: {out_dir.resolve()}")
+    # print(f"Saved plots to: {out_dir.resolve()}")
 
-    plot_calibration_curve("results.json", iou_threshold=0.5)
+    # plot_calibration_curve("results.json", iou_threshold=0.5)
 
     _, _, dataset = get_data_loaders(Config())
-    save_images_from_json(
-        "results.json",
-        dataset,
-        VOC_CLASSES=VOC_CLASSES,
-        num_predictions=445,
-        threshold=0.05,
-    )
+    # save_images_from_json(
+    #     "results.json",
+    #     dataset,
+    #     VOC_CLASSES=VOC_CLASSES,
+    #     num_predictions=10,
+    #     threshold=0.05,
+    # )
 
-    calculate_map("results.json", iou_threshold=0.5, num_classes=len(VOC_CLASSES))
+    # calculate_map("results.json", iou_threshold=0.5, num_classes=len(VOC_CLASSES))
 
+    threhold = 0.3
+
+    save_top_9_tps_separately("results.json", dataset, VOC_CLASSES, output_folder="top_results", threshold=threhold)
+
+    save_top_9_avg_iou_separately("results.json", dataset, VOC_CLASSES, output_folder="top_avg_results", threshold=threhold)
+
+    save_top_9_tp_ratio_separately("results.json", dataset, VOC_CLASSES, output_folder="top_tp_ratio", threshold=threhold)
+
+    save_top_9_fps_separately("results.json", dataset, VOC_CLASSES, output_folder="top_fps", threshold=threhold, iou_threshold=0.5)
 
 if __name__ == "__main__":
     main()
