@@ -40,6 +40,6 @@ cd $SLURM_SUBMIT_DIR
 
 # 5. Run testing
 echo "Starting YOLO testing..."
-python test_script.py
+python test_script_detection.py
 
 echo "Job finished on $(date)"

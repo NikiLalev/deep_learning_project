@@ -29,7 +29,7 @@ sys.path.insert(0, str(CURRENT_DIR))
 # Import project modules
 from src.model.classification_imagenet import YOLOPretrain
 from src.model.detector import YOLOv1
-from yolo_loss import YOLOv1Loss  # (kept import minimal; iou helpers not used here)
+from src.yolo_loss import YOLOv1Loss  # (kept import minimal; iou helpers not used here)
 
 
 def print_env() -> None:

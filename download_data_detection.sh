@@ -36,6 +36,6 @@ echo "Job started on $(date)"
 echo "Downloading to: $HF_HOME"
 
 
-python download_data.py --output_dir /scratch/$USER/voc_data
+python download_data_detection.py --output_dir /scratch/$USER/voc_data
 
 echo \"Job finished on \$(date)\"

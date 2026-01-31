@@ -40,6 +40,6 @@ cd $SLURM_SUBMIT_DIR
 
 # 5. Run Training
 echo "Starting YOLO pascal Posttraining..."
-python train_habrok.py
+python train_habrok_detection.py
 
 echo "Job finished on $(date)"

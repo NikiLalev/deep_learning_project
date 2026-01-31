@@ -4,7 +4,7 @@ import numpy as np
 from tqdm import tqdm
 from collections import Counter
 # You'll need an IoU and NMS function - I'll assume they are in your utils
-from utils import intersection_over_union, non_max_suppression, cellboxes_to_boxes
+from src.utils import intersection_over_union, non_max_suppression, cellboxes_to_boxes
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -15,7 +15,7 @@ matplotlib.use('Agg')
 import os
 
 from src.model.detector import YOLOv1
-from train_habrok import build_targets_yolov1, get_data_loaders, Config  # Assuming test_loader is defined in train_habrok.py
+from train_habrok_detection import build_targets_yolov1, get_data_loaders, Config  # Assuming test_loader is defined in train_habrok.py
 
 
 VOC_CLASSES = [
@@ -214,7 +214,7 @@ def get_bboxes(loader, model, iou_threshold, threshold, device, S=7, B=2, C=20):
             train_idx += 1
 
     # Save to file
-    with open("results.json", "w") as f:
+    with open("results/results.json", "w") as f:
         json.dump(all_json_data, f, indent=4)
 
     print(f"\nSaved results for {train_idx} images to results.json")

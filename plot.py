@@ -27,9 +27,9 @@ import torch
 from sklearn.calibration import calibration_curve
 from tqdm import tqdm
 
-from test_script import save_predictions
-from train_habrok import Config, get_data_loaders
-from utils import intersection_over_union
+from test_script_detection import save_predictions
+from train_habrok_detection import Config, get_data_loaders
+from src.utils import intersection_over_union
 from collections import Counter
 
 
@@ -400,7 +400,7 @@ def calculate_map(json_path: str | os.PathLike, iou_threshold: float = 0.5, num_
     '''    Calculate mAP for small, medium, and large objects separately.'''
 
     preds, gt_s, gt_m, gt_l = load_and_split_by_size(
-        "results.json", 448, 448
+        "results/results.json", 448, 448
     )
     gt_all = gt_s + gt_m + gt_l
     print("mAP (small): ", compute_map_for_subset(preds, gt_s).item())
@@ -740,43 +740,43 @@ def save_top_9_fps_separately(json_path, loader, VOC_CLASSES, output_folder="top
     print(f"Done! Check the '{output_folder}' folder.")
 
 def main() -> None:
-    # json_path = Path("training_history_20260129_110725.json")
-    # out_dir = Path("plots")
+    json_path = Path("results/training_history_20260129_110725.json")
+    out_dir = Path("plots")
 
-    # history = load_history(json_path)
-    # ensure_dir(out_dir)
+    history = load_history(json_path)
+    ensure_dir(out_dir)
 
-    # train_loss = history["train_loss"]
-    # val_loss = history["val_loss"]
+    train_loss = history["train_loss"]
+    val_loss = history["val_loss"]
 
-    # plot_train_vs_val(train_loss, val_loss, out_dir)
-    # plot_single(train_loss, "Training Loss", "Loss", "train_loss.pdf", out_dir)
-    # plot_single(val_loss, "Validation Loss", "Loss", "val_loss.pdf", out_dir)
+    plot_train_vs_val(train_loss, val_loss, out_dir)
+    plot_single(train_loss, "Training Loss", "Loss", "train_loss.pdf", out_dir)
+    plot_single(val_loss, "Validation Loss", "Loss", "val_loss.pdf", out_dir)
 
-    # print(f"Saved plots to: {out_dir.resolve()}")
+    print(f"Saved plots to: {out_dir.resolve()}")
 
-    # plot_calibration_curve("results.json", iou_threshold=0.5)
+    plot_calibration_curve("results/results.json", iou_threshold=0.5)
 
     _, _, dataset = get_data_loaders(Config())
-    # save_images_from_json(
-    #     "results.json",
-    #     dataset,
-    #     VOC_CLASSES=VOC_CLASSES,
-    #     num_predictions=10,
-    #     threshold=0.05,
-    # )
+    save_images_from_json(
+        "results/results.json",
+        dataset,
+        VOC_CLASSES=VOC_CLASSES,
+        num_predictions=10,
+        threshold=0.05,
+    )
 
-    # calculate_map("results.json", iou_threshold=0.5, num_classes=len(VOC_CLASSES))
+    calculate_map("results/results.json", iou_threshold=0.5, num_classes=len(VOC_CLASSES))
 
     threhold = 0.3
 
-    save_top_9_tps_separately("results.json", dataset, VOC_CLASSES, output_folder="top_results", threshold=threhold)
+    save_top_9_tps_separately("results/results.json", dataset, VOC_CLASSES, output_folder="top_results", threshold=threhold)
 
-    save_top_9_avg_iou_separately("results.json", dataset, VOC_CLASSES, output_folder="top_avg_results", threshold=threhold)
+    save_top_9_avg_iou_separately("results/results.json", dataset, VOC_CLASSES, output_folder="top_avg_results", threshold=threhold)
 
-    save_top_9_tp_ratio_separately("results.json", dataset, VOC_CLASSES, output_folder="top_tp_ratio", threshold=threhold)
+    save_top_9_tp_ratio_separately("results/results.json", dataset, VOC_CLASSES, output_folder="top_tp_ratio", threshold=threhold)
 
-    save_top_9_fps_separately("results.json", dataset, VOC_CLASSES, output_folder="top_fps", threshold=threhold, iou_threshold=0.5)
+    save_top_9_fps_separately("results/results.json", dataset, VOC_CLASSES, output_folder="top_fps", threshold=threhold, iou_threshold=0.5)
 
 if __name__ == "__main__":
     main()
