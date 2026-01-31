@@ -425,7 +425,7 @@ def train_model(
                 },
                 best_path,
             )
-            print(f"  ★ New best model! Val Loss: {val_loss:.4f} (saved to {best_path})")
+            print(f"New best model! Val Loss: {val_loss:.4f} (saved to {best_path})")
 
         print("=" * 60 + "\n")
 

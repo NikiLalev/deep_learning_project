@@ -224,7 +224,7 @@ def get_bboxes(loader, model, iou_threshold, threshold, device, S=7, B=2, C=20):
 
 def main():
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    # Load your DETECTION model (not the Pretrain one)
+    # Load your DETECTION model
     model = YOLOv1(split_size=7, num_boxes=2, num_classes=20).to(DEVICE)
     
     # Load the Post-train checkpoint
